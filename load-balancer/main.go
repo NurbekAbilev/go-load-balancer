@@ -66,7 +66,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	client := &http.Client{}
 
-	response, err := client.Do(r)
+	response, err := client.Do(req)
 	if err != nil {
 		logWithPrefix(fmt.Sprintf("Error forwarding request: %s", err.Error()))
 		http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
