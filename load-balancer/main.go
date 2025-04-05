@@ -1,41 +1,85 @@
 package main
 
 import (
-	"encoding/json"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/google/uuid"
 )
 
-type Response struct {
-	Message string `json:"message"`
-}
+func main() {
+	logWithPrefix("Starting server on :8080")
 
-var instanceID string
+	domain := "app"
+	ips, err := getIPsFromDNS(domain)
+	if err != nil {
+		logWithPrefix("Failed to get IPs from DNS: " + err.Error())
+		return
+	} else {
+		logWithPrefix("IPs for " + domain + ": " + strings.Join(ips, ", "))
+	}
 
-func initInstanceID() {
-	instanceID = strings.ReplaceAll(uuid.New().String(), "-", "")[:5]
+	http.HandleFunc("/", handler)
+	if err := http.ListenAndServe(":8080", nil); err != nil {
+		logWithPrefix("Server failed to start: " + err.Error())
+	}
 }
 
 func logWithPrefix(message string) {
 	timestamp := time.Now().Format("2006-01-02 15:04:05")
-	log.Printf("[%s] [Instance: %s] %s", timestamp, instanceID, message)
+	log.Printf("[Balancer: %s] %s", timestamp, message)
 }
 
+var roundRobinInd int = 0
+
 func handler(w http.ResponseWriter, r *http.Request) {
-	logWithPrefix("Received request: " + r.Method + " " + r.URL.Path)
-	response := Response{Message: "Hello, World!"}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		logWithPrefix("Error encoding response: " + err.Error())
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	ips, err := getIPsFromDNS("app")
+	if err != nil {
+		logWithPrefix(fmt.Sprintf("Failed to get IPs from DNS: %s", err.Error()))
+		http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	logWithPrefix("Response sent successfully")
+	if len(ips) == 0 {
+		logWithPrefix("No IPs available for app")
+		http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	targetUrl := "http://" + ips[0] + ":8080" + r.RequestURI
+	logWithPrefix(fmt.Sprintf("target url is %s\n", targetUrl))
+
+	req, err := http.NewRequest(r.Method, targetUrl, r.Body)
+	if err != nil {
+		logWithPrefix(fmt.Sprintf("error creating request: %s", err.Error()))
+		http.Error(w, "error creating request", http.StatusInternalServerError)
+	}
+	defer r.Body.Close()
+
+	for name, values := range r.Header {
+		for _, v := range values {
+			req.Header.Add(name, v)
+		}
+	}
+
+	client := &http.Client{}
+
+	response, err := client.Do(r)
+	if err != nil {
+		logWithPrefix(fmt.Sprintf("Error forwarding request: %s", err.Error()))
+		http.Error(w, "Service unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	defer response.Body.Close()
+
+	w.WriteHeader(response.StatusCode)
+	if _, err := io.Copy(w, response.Body); err != nil {
+		logWithPrefix(fmt.Sprintf("Error writing response: %s", err.Error()))
+	}
+
+	// w.Write(io.ByteReader(response.Body))
 }
 
 func getIPsFromDNS(domain string) ([]string, error) {
@@ -48,22 +92,4 @@ func getIPsFromDNS(domain string) ([]string, error) {
 		ipStrings = append(ipStrings, ip.String())
 	}
 	return ipStrings, nil
-}
-
-func main() {
-	initInstanceID()
-	logWithPrefix("Starting server on :8080")
-
-	domain := "app"
-	ips, err := getIPsFromDNS(domain)
-	if err != nil {
-		logWithPrefix("Failed to get IPs from DNS: " + err.Error())
-	} else {
-		logWithPrefix("IPs for " + domain + ": " + strings.Join(ips, ", "))
-	}
-
-	http.HandleFunc("/", handler)
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		logWithPrefix("Server failed to start: " + err.Error())
-	}
 }
